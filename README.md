@@ -1,6 +1,8 @@
 # Card Reader Lite
 
-Paste a debate case straight from Word or Google Docs and get back just what you read: tags, titles, and the highlighted text. One file, no upload, everything runs in your browser.
+Open it: a blank white page. Paste a debate case copied from Word or Google Docs (Cmd/Ctrl-V). The page becomes just the readable text: tags, contention titles, and the highlighted words in their original colors, in Calibri, filling the whole page. Nothing else. Paste again to replace it.
+
+Blacked-out (redacted) text is never included. Everything runs in your browser; nothing uploads.
 
 Live: https://hossboss33.github.io/cardviewer-lite/
 
