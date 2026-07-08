@@ -1,0 +1,975 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card Reader Lite</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%2316233c'/%3E%3Crect x='10.5' y='8' width='19' height='24' rx='3' fill='%23fff'/%3E%3Crect x='13.6' y='12.6' width='12.8' height='3.6' rx='1.8' fill='%23aac4ee'/%3E%3Crect x='13.6' y='19' width='12.8' height='1.9' rx='.95' fill='%23c8d2e2'/%3E%3Crect x='13.6' y='22.7' width='9.2' height='1.9' rx='.95' fill='%23c8d2e2'/%3E%3C/svg%3E">
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;background:#f5f6f8;color:#111c2e;
+  font-family:"Calibri","Carlito","Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+  font-size:16px;line-height:1.55;
+}
+.wrap{max-width:760px;margin:0 auto;padding:34px 5vw 60px}
+h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:#65748b;margin:0 0 22px;font-size:14px}
+.box{
+  min-height:150px;max-height:45vh;overflow:auto;background:#fff;color:#111c2e;
+  border:1px solid #d3dae4;border-radius:12px;padding:14px 16px;font-size:14px;
+}
+.box:focus{outline:2px solid #3661a8}
+.box:empty::before{content:attr(data-ph);color:#8a97a8;pointer-events:none}
+.row{display:flex;gap:10px;align-items:center;margin:14px 0 30px;flex-wrap:wrap}
+button{
+  font:inherit;font-size:14px;font-weight:600;cursor:pointer;border:none;border-radius:999px;
+  background:#16233c;color:#fff;padding:9px 20px;transition:background .15s,transform .1s;
+}
+button:hover{background:#22335a}
+button:active{transform:scale(.97)}
+button.ghost{background:#fff;color:#111c2e;border:1px solid #d3dae4}
+button.ghost:hover{background:#eef0f4}
+button.done{background:#1f9d61}
+.err{border:1px solid #c2413d;background:rgba(194,65,61,.07);color:#c2413d;border-radius:10px;padding:10px 14px;margin:0 0 18px;display:none}
+#out{display:none}
+.title{font-weight:800;font-size:19px;text-align:center;margin:26px 0 6px}
+.tag{font-weight:800;font-size:17px;margin:22px 0 6px}
+.read{font-size:16px;font-weight:600;color:#0d1524}
+mark{background:var(--c,#fff23b);color:var(--i,#0b1220);padding:.02em .06em;border-radius:3px;-webkit-box-decoration-break:clone;box-decoration-break:clone}
+.an{margin:14px 0;color:#0d1524}
+.muted{color:#8a97a8;font-style:italic;font-size:14px}
+.num{font-weight:800;color:#3661a8}
+.foot{margin-top:50px;color:#8a97a8;font-size:12px;text-align:center}
+.foot a{color:#3661a8}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Card Reader Lite</h1>
+  <p class="sub">Paste a case straight from Word or Google Docs. Get back just what you read: tags, titles, and the highlighted text. Nothing uploads; it all happens in your browser.</p>
+  <div class="box" id="box" contenteditable="true" spellcheck="false" data-ph="Paste your case here (Cmd/Ctrl-V). Copy it from Word or Google Docs so the highlighting comes through."></div>
+  <div class="row">
+    <button id="go" type="button">Read it</button>
+    <button id="copy" class="ghost" type="button" style="display:none">Copy the read</button>
+    <button id="clear" class="ghost" type="button">Clear</button>
+  </div>
+  <div class="err" id="err"></div>
+  <div id="out"></div>
+  <div class="foot">made by Aidan Hosler &middot; want the full app (docx upload, timer, editor, export)? <a href="https://hossboss33.github.io/cardviewer/">Card Reader</a></div>
+</div>
+
+<script id="cr-parser">
+"use strict";
+window.CardReaderParser=(function(){
+const W='http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const XMLNS='http://www.w3.org/XML/1998/namespace';
+
+/* ---- 16 named Word highlight colors -> display hex (keys lower-cased) ---- */
+const NAMED={
+  black:'#3a3a3a', blue:'#5b7cff', cyan:'#22e0ef', darkblue:'#25408f', darkcyan:'#0f8ea0',
+  darkgreen:'#1f8a4c', darkmagenta:'#9b2b8f', darkred:'#c0392b', darkyellow:'#b7952b',
+  green:'#37e08a', lightgray:'#d9dee6', darkgray:'#9aa6b4', magenta:'#ff5bd0',
+  red:'#ff5a5a', white:'#ffffff', yellow:'#fff23b'
+};
+const THEME_NEUTRAL='#c9d6ea';
+const NON_HL_THEME=['background1','light1','background','window','bg1'];
+
+/* ---------- tiny namespaced-DOM helpers ---------- */
+function kids(node,local){const o=[];if(!node)return o;for(let c=node.firstChild;c;c=c.nextSibling){if(c.nodeType===1&&c.localName===local&&c.namespaceURI===W)o.push(c);}return o;}
+function kid(node,local){if(!node)return null;for(let c=node.firstChild;c;c=c.nextSibling){if(c.nodeType===1&&c.localName===local&&c.namespaceURI===W)return c;}return null;}
+function wval(node,name){if(!node||!node.getAttributeNS)return null;const v=node.getAttributeNS(W,name);return v===''?null:v;}
+function xmlSpacePreserve(node){if(!node||!node.getAttributeNS)return false;return node.getAttributeNS(XMLNS,'space')==='preserve';}
+function toggleOn(node){const v=wval(node,'val');if(v==null)return true;const s=(''+v).toLowerCase();return !(s==='0'||s==='false'||s==='off');}
+
+/* ---------- run-property extraction & merge ---------- */
+function extractRpr(rPr){
+  const o={};
+  if(!rPr)return o;
+  const b=kid(rPr,'b'); if(b) o.bold=toggleOn(b);
+  const u=kid(rPr,'u'); if(u){const v=(wval(u,'val')||'single').toLowerCase(); o.underline=(v!=='none');}
+  const i=kid(rPr,'i'); if(i) o.italic=toggleOn(i);
+  const caps=kid(rPr,'caps'); if(caps) o.caps=toggleOn(caps);
+  const sz=kid(rPr,'sz'); if(sz){const v=parseInt(wval(sz,'val'),10); if(!isNaN(v)) o.szHP=v;}
+  const hl=kid(rPr,'highlight'); if(hl){o.hl=(wval(hl,'val')||'').toLowerCase();}
+  const shd=kid(rPr,'shd'); if(shd){o.shd=true; o.shdFill=(wval(shd,'fill')||'').toLowerCase(); o.shdTheme=(wval(shd,'themeFill')||'').toLowerCase();}
+  const rStyle=kid(rPr,'rStyle'); if(rStyle){o.rStyle=wval(rStyle,'val');}
+  return o;
+}
+function mergeRpr(base,over){const o=Object.assign({},base);for(const k in over){if(over[k]!==undefined)o[k]=over[k];}return o;}
+
+/* ---------- style table ---------- */
+function buildStyles(stylesDoc){
+  const map={};
+  let docDefaults={};
+  if(!stylesDoc) return {map:map,docDefaults:docDefaults};
+  const root=stylesDoc.documentElement;
+  if(!root) return {map:map,docDefaults:docDefaults};
+  const dd=kid(root,'docDefaults');
+  if(dd){const rd=kid(dd,'rPrDefault'); if(rd){docDefaults=extractRpr(kid(rd,'rPr'));}}
+  for(const st of kids(root,'style')){
+    const id=wval(st,'styleId'); if(!id)continue;
+    const nameEl=kid(st,'name');
+    const basedOn=kid(st,'basedOn');
+    // capture list numbering carried by the paragraph style (some templates number
+    // their standards/voters via a style rather than directly on each paragraph)
+    let numId=null,ilvl=null; const pPr=kid(st,'pPr');
+    if(pPr){const np=kid(pPr,'numPr'); if(np){const ni=kid(np,'numId'); if(ni)numId=wval(ni,'val'); const il=kid(np,'ilvl'); if(il)ilvl=parseInt(wval(il,'val'),10)||0;}}
+    map[id]={
+      id:id,
+      type:wval(st,'type')||'',
+      name:nameEl?(wval(nameEl,'val')||''):'',
+      basedOn:basedOn?wval(basedOn,'val'):null,
+      rPr:extractRpr(kid(st,'rPr')),
+      numId:numId,ilvl:ilvl
+    };
+  }
+  return {map:map,docDefaults:docDefaults};
+}
+/* numbering (numId/ilvl) a paragraph inherits from its style chain, if any */
+function styleNumPr(styleTable,styleId){
+  const guard={};let id=styleId;
+  while(id&&styleTable.map[id]&&!guard[id]){guard[id]=1;const s=styleTable.map[id];if(s.numId!=null)return {numId:s.numId,ilvl:s.ilvl||0};id=s.basedOn;}
+  return null;
+}
+function styleChainRpr(styleTable,styleId){
+  if(!styleId||!styleTable.map[styleId])return {};
+  const chain=[];const guard={};let id=styleId;
+  while(id&&styleTable.map[id]&&!guard[id]){guard[id]=1;chain.push(styleTable.map[id]);id=styleTable.map[id].basedOn;}
+  let acc={};
+  for(let i=chain.length-1;i>=0;i--){acc=mergeRpr(acc,chain[i].rPr||{});}
+  return acc;
+}
+function styleName(styleTable,styleId){
+  if(!styleId)return '';
+  const s=styleTable.map[styleId];
+  return s?(s.name||s.id):styleId;
+}
+
+/* ---------- highlight decision from an effective rPr ---------- */
+/* blacked-out text (a black or near-black fill) is a REDACTION, not a highlight:
+   it must never join the read-aloud text */
+function isBlackout(hex){
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex||'');
+  if(!m)return false;
+  const r=parseInt(m[1].slice(0,2),16),g=parseInt(m[1].slice(2,4),16),b=parseInt(m[1].slice(4,6),16);
+  return r<40&&g<40&&b<40;
+}
+function highlightOf(eff){
+  const n=eff.hl;
+  if(n&&n!=='none'&&n!=='white'){
+    const c=NAMED[n]||THEME_NEUTRAL;
+    if(n==='black'||isBlackout(c))return {hl:false,color:null};
+    return {hl:true,color:c};
+  }
+  if(eff.shd){
+    const f=eff.shdFill;
+    if(f&&f!=='auto'&&f!=='ffffff'&&f!==''){
+      // Only accept a real 3/6-digit hex fill; any other value (incl. injection
+      // attempts via a single-quoted attribute) is still a highlight, rendered in
+      // a safe neutral so untrusted text can never reach the style attribute raw.
+      const c=(/^[0-9a-f]{6}$/.test(f)||/^[0-9a-f]{3}$/.test(f))?('#'+(f.length===3?f.replace(/(.)/g,'$1$1'):f)):THEME_NEUTRAL;
+      if(isBlackout(c))return {hl:false,color:null};
+      return {hl:true,color:c};
+    }
+    const t=eff.shdTheme;
+    if(t&&NON_HL_THEME.indexOf(t)===-1){ return {hl:true,color:THEME_NEUTRAL}; }
+  }
+  return {hl:false,color:null};
+}
+/* Sink-side guard: only ever emit a validated CSS hex color into a style attribute. */
+function cssColor(c){ return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c||'')?c:'#fff23b'; }
+
+/* ---------- run collection (skip <w:del>, keep <w:ins>, descend hyperlinks) ---------- */
+function collectRuns(p){
+  const runs=[];
+  (function rec(node){
+    for(let c=node.firstChild;c;c=c.nextSibling){
+      if(c.nodeType!==1)continue;
+      const ln=c.localName, ns=c.namespaceURI;
+      if(ns===W&&ln==='del')continue;              // deletion: skip subtree
+      if(ns===W&&ln==='r'){runs.push(c);continue;} // a run: collect, don't descend
+      rec(c);                                       // ins / hyperlink / smartTag / sdt / other: descend
+    }
+  })(p);
+  return runs;
+}
+function runText(r){
+  let s='';
+  for(let c=r.firstChild;c;c=c.nextSibling){
+    if(c.nodeType!==1||c.namespaceURI!==W)continue;
+    const ln=c.localName;
+    if(ln==='t'){ s+=c.textContent; }
+    else if(ln==='tab'){ s+='\t'; }
+    else if(ln==='br'||ln==='cr'){ s+='\n'; }
+    else if(ln==='noBreakHyphen'){ s+='-'; }
+    /* instrText, delText, fldChar, drawing text: ignored */
+  }
+  return s;
+}
+
+/* ---------- text helpers ---------- */
+function wordCount(t){const m=(t||'').trim();if(!m)return 0;return m.split(/\s+/).length;}
+function capsRatio(t){
+  const letters=(t.match(/[A-Za-z]/g)||[]).length;
+  if(letters<3)return {ratio:0,letters:letters};
+  const upper=(t.match(/[A-Z]/g)||[]).length;
+  return {ratio:upper/letters,letters:letters};
+}
+function isCiteish(text){
+  const t=(text||'').trim();
+  if(!t)return false;
+  if(/https?:\/\/|www\.[a-z0-9]/i.test(t))return true;      // URL
+  if(/\/\/[A-Za-z][\w-]*\s*$/.test(t))return true;          // //Delbarton ending
+  if(/^[A-Za-zÀ-ÿ'’.\- ]{2,40}?,?\s+['‘’]?(?:\d{1,2}|ND)\s*[\(\[—–]/.test(t))return true; // "Stackpole 25 (", "Walker 23 [", "Unger 9—", "Congress 'ND ["
+  if(/^(?:[A-Z][A-Za-zÀ-ÿ'’.\-]*\s*){1,4}\(\s*[A-Z][^)]{25,}/.test(t))return true;         // "Columbia Law Review(Columbia Law Review writes at ..."
+  if(/(?:^|\s)[A-Z][A-Za-zÀ-ÿ'’.\-]+\s+['‘’]?\d{1,2}\s*(?:--|—|–)?\s*\[/.test(t))return true; // mid-sentence "... Pearce 23 -- [..."
+  if(/^[A-Z][A-Za-zÀ-ÿ'’.\-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'’.\-]+){0,3},\s*\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/.test(t))return true; // "Rich Cooper, 03-30-2015, ..."
+  if(/^[A-Z][A-Za-zÀ-ÿ'’.\-]+,\s+[A-Z][A-Za-zÀ-ÿ'’.\- ]{0,40}\.\s*["“]/.test(t))return true; // "Rivera, Ana. "Untitled essay."" - undated cites still name their author
+  const bracket=/\[[^\]]{3,}\]/.test(t);
+  const date=/\b(?:19|20)\d{2}\b/.test(t)||/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(t)||/date\s+accessed/i.test(t);
+  if(bracket&&date)return true;
+  // plain academic form: "Smith, John. "Title." Journal, 2024." - an author-name
+  // signature plus a year plus a quoted title or journal-ish word
+  if(/^[A-Z][A-Za-z'’-]+,\s+[A-Z]/.test(t)
+     &&/\b(?:19|20)\d{2}\b/.test(t)
+     &&(/["“”'‘’]/.test(t)||/\b(?:journal|review|press|university|quarterly|report|institute|magazine|times|post|news|vol\.|no\.|pp?\.)\b/i.test(t)))return true;
+  return false;
+}
+
+/* =========================================================================
+   buildCardModel: the whole parse
+   ========================================================================= */
+/* ---- Word list numbering (numbering.xml) ---- */
+function buildNumbering(numDoc){
+  const map={}; // numId -> { ilvl -> {fmt,text,start} }
+  if(!numDoc||!numDoc.documentElement)return map;
+  const root=numDoc.documentElement;
+  const abstracts={};
+  for(const an of kids(root,'abstractNum')){
+    const aid=wval(an,'abstractNumId'); const levels={};
+    for(const lvl of kids(an,'lvl')){
+      const il=wval(lvl,'ilvl')||'0';
+      const f=kid(lvl,'numFmt'), tx=kid(lvl,'lvlText'), st=kid(lvl,'start');
+      levels[il]={fmt:(f?wval(f,'val'):'decimal')||'decimal', text:(tx?wval(tx,'val'):null)||('%'+(parseInt(il,10)+1)+'.'), start:st?(parseInt(wval(st,'val'),10)||1):1};
+    }
+    if(aid!=null)abstracts[aid]=levels;
+  }
+  for(const n of kids(root,'num')){
+    const nid=wval(n,'numId'); const ai=kid(n,'abstractNumId'); const aid=ai?wval(ai,'val'):null;
+    if(nid!=null)map[nid]=abstracts[aid]||{};
+  }
+  return map;
+}
+function romanNum(n){const t=[[1000,'m'],[900,'cm'],[500,'d'],[400,'cd'],[100,'c'],[90,'xc'],[50,'l'],[40,'xl'],[10,'x'],[9,'ix'],[5,'v'],[4,'iv'],[1,'i']];let s='';for(const[v,sym]of t){while(n>=v){s+=sym;n-=v;}}return s;}
+function fmtListNum(n,fmt){
+  switch(fmt){
+    case 'lowerLetter': return String.fromCharCode(97+((n-1)%26));
+    case 'upperLetter': return String.fromCharCode(65+((n-1)%26));
+    case 'lowerRoman': return romanNum(n);
+    case 'upperRoman': return romanNum(n).toUpperCase();
+    case 'decimalZero': return (n<10?'0':'')+n;
+    default: return ''+n; // decimal / ordinal / anything else
+  }
+}
+function buildCardModel(documentXml,stylesXml,numberingXml){
+  const parser=new DOMParser();
+  const dpx=parser.parseFromString(documentXml,'application/xml');
+  if(dpx.getElementsByTagName('parsererror').length){
+    throw new Error('The document XML could not be parsed.');
+  }
+  let stylesDoc=null;
+  if(stylesXml){
+    const s=parser.parseFromString(stylesXml,'application/xml');
+    if(!s.getElementsByTagName('parsererror').length) stylesDoc=s;
+  }
+  const styleTable=buildStyles(stylesDoc);
+  const numbering=buildNumbering(numberingXml?(function(){const n=parser.parseFromString(numberingXml,'application/xml');return n.getElementsByTagName('parsererror').length?null:n;})():null);
+
+  const bodyEl=kid(dpx.documentElement,'body');
+  if(!bodyEl) throw new Error('The document has no <w:body>.');
+
+  // gather paragraphs in document order (top-level + inside tables)
+  const paraEls=[];
+  (function walk(node){
+    for(let c=node.firstChild;c;c=c.nextSibling){
+      if(c.nodeType!==1||c.namespaceURI!==W)continue;
+      if(c.localName==='p'){paraEls.push(c);}
+      else if(c.localName==='tbl'||c.localName==='tr'||c.localName==='tc'||c.localName==='sdt'||c.localName==='sdtContent'){walk(c);}
+    }
+  })(bodyEl);
+
+  // First pass: build paragraph objects with resolved runs
+  const paras=[];
+  const sizeWeight={}; // char-weighted size frequency across whole doc
+  for(const p of paraEls){
+    const pPr=kid(p,'pPr');
+    const pStyleId=pPr?(function(){const ps=kid(pPr,'pStyle');return ps?wval(ps,'val'):null;})():null;
+    let numId=null,ilvl=0;
+    if(pPr){const np=kid(pPr,'numPr'); if(np){const ni=kid(np,'numId'); if(ni)numId=wval(ni,'val'); const il=kid(np,'ilvl'); if(il)ilvl=parseInt(wval(il,'val'),10)||0;}}
+    if(numId==null&&pStyleId){const sn=styleNumPr(styleTable,pStyleId); if(sn){numId=sn.numId;ilvl=sn.ilvl;}} // numbering from the paragraph style
+    const paraStyleRpr=styleChainRpr(styleTable,pStyleId);
+    const runEls=collectRuns(p);
+    const runs=[];
+    let boldChars=0,totalChars=0,maxSizeHP=0,text='';
+    for(const r of runEls){
+      const rprEl=kid(r,'rPr');
+      const runRpr=extractRpr(rprEl);
+      let eff=mergeRpr(styleTable.docDefaults,paraStyleRpr);
+      if(runRpr.rStyle){eff=mergeRpr(eff,styleChainRpr(styleTable,runRpr.rStyle));}
+      eff=mergeRpr(eff,runRpr);
+      let t=runText(r);
+      if(!t)continue;
+      const szHP=eff.szHP||22;
+      const hl=highlightOf(eff);
+      const bold=!!eff.bold;
+      const underline=!!eff.underline;
+      const italic=!!eff.italic;
+      const tier=hl.hl?'read':((bold||underline)?'emph':'bulk');
+      // display text: caps rendering only affects visual, keep source text
+      runs.push({text:t,tier:tier,color:hl.color,szHP:szHP,bold:bold,underline:underline,italic:italic});
+      const len=t.length;
+      totalChars+=len;
+      if(bold)boldChars+=len;
+      const trimmed=t.trim();
+      if(trimmed){ if(szHP>maxSizeHP)maxSizeHP=szHP; sizeWeight[szHP]=(sizeWeight[szHP]||0)+trimmed.length; }
+      text+=t;
+    }
+    const cr=capsRatio(text);
+    paras.push({
+      el:p,
+      runs:runs,
+      text:text,
+      wordCount:wordCount(text),
+      maxSizeHP:maxSizeHP,
+      fracBold:totalChars?boldChars/totalChars:0,
+      hasHighlight:runs.some(function(r){return r.tier==='read';}),
+      allCaps:(cr.ratio>=0.72&&cr.letters>=4),  /* the <=26-word gate lives in isHeader */
+      styleName:styleName(styleTable,pStyleId),
+      styleId:pStyleId||'',
+      citeish:isCiteish(text),
+      numId:numId,ilvl:ilvl,numText:null,
+      role:null
+    });
+  }
+  return finishCardModel(paras,numbering);
+}
+
+/* Shared back-half: reconstruct numbering → classify roles → group → build streams.
+   Used by both the .docx parser and the pasted-HTML parser, which each produce the
+   same `paras` structure (runs with text/tier/color/szHP/bold/underline/italic, plus
+   wordCount/maxSizeHP/fracBold/hasHighlight/allCaps/styleName/citeish/numId/ilvl). */
+function finishCardModel(paras,numbering){
+  numbering=numbering||{};
+
+  // Strip export junk like <<TABLE OMITTED>> or <<LINE BREAK>> (Lexis/Verbatim
+  // drop these markers where a table, graphic, or break sat in the source). Any
+  // <<...>> token is such a marker, never spoken content. Short + ALL-CAPS, so
+  // left alone one would read as a strong header, tag, or analytic and split the
+  // card mid-body. Matched on the paragraph's joined text (Word may split the
+  // token across runs), removed everywhere, and a paragraph left empty by the
+  // removal is dropped entirely.
+  {
+    const JUNK=/<<[^<>]{1,80}>>/g;
+    for(let i=paras.length-1;i>=0;i--){
+      const pa=paras[i];
+      if(pa.text.indexOf('<<')===-1)continue;
+      const spans=[];let mm;JUNK.lastIndex=0;
+      while((mm=JUNK.exec(pa.text))!==null){spans.push([mm.index,mm.index+mm[0].length]);}
+      if(!spans.length)continue;
+      let pos=0;
+      for(const r of pa.runs){
+        const start=pos;pos+=r.text.length;
+        let nt='';
+        for(let k=0;k<r.text.length;k++){
+          const gi=start+k;let cut=false;
+          for(const s of spans){ if(gi>=s[0]&&gi<s[1]){cut=true;break;} }
+          if(!cut)nt+=r.text[k];
+        }
+        r.text=nt;
+      }
+      pa.runs=pa.runs.filter(function(r){return r.text.length>0;});
+      pa.text=pa.runs.map(function(r){return r.text;}).join('');
+      if(!pa.text.trim()){paras.splice(i,1);continue;}
+      pa.wordCount=wordCount(pa.text);
+      pa.hasHighlight=pa.runs.some(function(r){return r.tier==='read';});
+      const cr=capsRatio(pa.text);
+      pa.allCaps=(cr.ratio>=0.72&&cr.letters>=4);
+      pa.citeish=isCiteish(pa.text);
+      let boldChars=0,totalChars=0,maxSizeHP=0;
+      for(const r of pa.runs){
+        const len=r.text.length;totalChars+=len;
+        if(r.bold)boldChars+=len;
+        if(r.text.trim()&&r.szHP>maxSizeHP)maxSizeHP=r.szHP;
+      }
+      pa.fracBold=totalChars?boldChars/totalChars:0;
+      pa.maxSizeHP=maxSizeHP;
+    }
+  }
+
+  const sizeWeight={};
+  for(const pa of paras){for(const r of pa.runs){const tr=(r.text||'').trim(); if(tr)sizeWeight[r.szHP]=(sizeWeight[r.szHP]||0)+tr.length;}}
+
+  // reconstruct list numbers (1. / a. / i. …) for auto-numbered paragraphs
+  {
+    const counters={}; // numId -> array indexed by ilvl
+    for(const pa of paras){
+      if(pa.numId==null||pa.numId==='0'||!pa.text.trim())continue; // numId 0 = explicitly no numbering
+      const lvls=numbering[pa.numId]||{};
+      const lv=lvls[''+pa.ilvl];
+      const fmt=lv?lv.fmt:'decimal';
+      if(fmt==='none')continue;
+      if(fmt==='bullet'){pa.numText='•';continue;}
+      const start=lv?lv.start:1;
+      const lvlText=lv?lv.text:('%'+(pa.ilvl+1)+'.');
+      let c=counters[pa.numId]||(counters[pa.numId]=[]);
+      for(let k=pa.ilvl+1;k<c.length;k++)c[k]=undefined;         // reset deeper levels
+      c[pa.ilvl]=(c[pa.ilvl]===undefined?start:c[pa.ilvl]+1);
+      pa.numText=lvlText.replace(/%([1-9])/g,function(_,d){
+        const idx=parseInt(d,10)-1; const cv=c[idx]===undefined?1:c[idx];
+        const lf=(lvls[''+idx]&&lvls[''+idx].fmt)||'decimal';
+        return fmtListNum(cv,lf);
+      });
+    }
+  }
+
+  // document body modal size (char-weighted)
+  let bodySize=22,bestW=-1;
+  for(const k in sizeWeight){ if(sizeWeight[k]>bestW){bestW=sizeWeight[k];bodySize=parseInt(k,10);} }
+  const sizeGate=Math.max(24,bodySize+2);
+
+  // STRONG header = a real tag/title signal: heading/tag STYLE, or a short paragraph
+  // that is mostly-bold / larger-than-body / ALL-CAPS. Deliberately does NOT include
+  // "the line sits above a citation": a non-highlighted definition/warning that comes
+  // between the real (bold) tag and the citation must not be mistaken for a tag and
+  // split the card. (That structural cue is kept, but only as a fallback below, for
+  // cards whose tag has no formatting at all.)
+  const styleIsHeaderish=function(name){return /heading|(^|\W)tag(\W|$)|pocket|hat|block|title|subtitle|caps\b/i.test(name||'');};
+  function isStrongHeader(pa){
+    if(!pa.text.trim()||pa.hasHighlight||pa.citeish)return false;
+    // letter/roman-enumerated ALL-CAPS lines ("C. GOVERNMENT...", "IV. MEASURES...")
+    // are outline headings the source article carried, never tags
+    if(pa.allCaps&&/^\s*(?:[IVXLCDM]{1,4}|[A-Z])[.)]\s/.test(pa.text))return false;
+    if(styleIsHeaderish(pa.styleName)&&pa.wordCount<=120)return true;  // styled tags/headers (incl. long shell parts)
+    if(pa.wordCount>=1&&pa.wordCount<=26){
+      if(pa.fracBold>=0.5)return true;
+      if(pa.maxSizeHP>=sizeGate)return true;
+      // ALL-CAPS alone counts only when STRICTLY larger than the document's
+      // modal text size: all-caps lines at bulk size are outline headings kept
+      // INSIDE evidence by the source article ("IV. PREVENTATIVE MEASURES..."),
+      // not tags. (In condensed cards the modal size IS the shrunken bulk.)
+      if(pa.allCaps&&pa.maxSizeHP>bodySize)return true;
+    }
+    return false;
+  }
+  const strong=paras.map(isStrongHeader);
+
+  // Nothing sandwiched between a citation and its card body may act as a header.
+  // Export junk like a lone "ABSOLUTE" line, source-formatting leftovers, and
+  // warnings sit right after the cite; short + caps/bold, they'd otherwise read
+  // as a tag and split the card. A candidate whose nearest paragraph above is a
+  // cite stays a header ONLY if it brings its own cite within the next two
+  // paragraphs (a genuine back-to-back card); otherwise it's demoted to body.
+  for(let i=0;i<paras.length;i++){
+    if(!strong[i])continue;
+    let p=i-1;
+    while(p>=0&&!paras[p].text.trim())p--;
+    if(p<0||!paras[p].citeish)continue;
+    let ownCite=false;
+    for(let j=i+1;j<paras.length&&j<=i+2;j++){
+      if(paras[j].citeish){ownCite=true;break;}
+      if(paras[j].hasHighlight)break;
+    }
+    if(!ownCite)strong[i]=false;
+  }
+
+  // A strong header is a TAG if a cite or highlighted body appears before the next
+  // STRONG header (non-strong pre-cite lines like definitions are skipped, not boundaries).
+  const isTagArr=paras.map(function(pa,i){
+    if(!strong[i])return false;
+    for(let j=i+1;j<paras.length;j++){ if(strong[j])break; if(paras[j].citeish||paras[j].hasHighlight)return true; }
+    return false;
+  });
+  // Typical tag size (count-weighted modal maxSizeHP among tags) so we can tell a big
+  // *section/shell title* apart from a same-styled sub-header.
+  let tagBand=26; {
+    const freq={}; paras.forEach(function(pa,i){ if(isTagArr[i]&&pa.maxSizeHP){ freq[pa.maxSizeHP]=(freq[pa.maxSizeHP]||0)+1; } });
+    let best=-1; for(const k in freq){ if(freq[k]>best){best=freq[k];tagBand=parseInt(k,10);} }
+  }
+  const bigTitleStyle=function(name){return /(^|\W)(title|subtitle|heading\s*[0-3]|pocket|hat|block)(\W|$)/i.test(name||'');};
+  const titleSizeGate=Math.max(30,tagBand+4);
+
+  // Section-name lines are TITLES no matter how they're formatted: contention /
+  // advantage / observation names, C1/A2 shorthand, and AFF/NEG/Pro/Con labels.
+  // opencaselist disclosure docs stack several of these (round header, side,
+  // contention name) and none of them may become a tag or an analytic.
+  const sectionName=function(t){
+    t=(t||'').replace(/[​‌﻿]/g,'').trim();   // zero-width chars hide in disclosure docs ("​​1NC")
+    return /(^|\n)\s*(?:the\s+|our\s+(?:sole\s+)?)?contentions?\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|is\b)/i.test(t)
+        || /^(?:advantage|observation|scenario)\s+(?:one|two|three|four|five|\d+)\b/i.test(t)
+        || /^[ac]\d+[\s:.\-—–]/i.test(t)
+        || /^\d\s*(?:ac|nc|ar|nr)(?:\s*[-—–:.]+.*)?$/i.test(t)       // "2AC", "1AC---Berkeley---R6" (not "1NC Patterson proves...")
+        || /^a(?:t|2):\s*/i.test(t)                                  // "AT: Cascades" (not "At worst, ..." sentences)
+        || /\b(?:da|cp|advantage|adv|kritik)\.?\s*$/i.test(t)        // "Intellectual Property DA."
+        || /^(?:framing|framework|overview|underview|weighing|impacts?|solvency|theory|top\s+level|implementation)\s*[.!:]?\s*$/i.test(t)
+        || /^(?:aff|neg|pro|con)(?:\s+case)?\s*$/i.test(t);
+  };
+
+  // Assign roles: title (big section/shell divider) / tag / analytic (read-aloud
+  // block content, e.g. a theory shell's interp/standards/voters) / cite / body.
+  for(let i=0;i<paras.length;i++){
+    if(paras[i].wordCount<=12&&sectionName(paras[i].text)){ paras[i].role='title'; continue; }
+    if(!strong[i]){ paras[i].role=paras[i].citeish?'cite':'body'; continue; }
+    if(isTagArr[i]){ paras[i].role='tag'; continue; }
+    // A tag-less strong header is a section/shell TITLE if it's big (style or font) or
+    // ALL-CAPS (a classic divider cue); otherwise it's read-aloud ANALYTIC content.
+    const big = bigTitleStyle(paras[i].styleName) || paras[i].maxSizeHP>=titleSizeGate || paras[i].allCaps;
+    paras[i].role = big ? 'title' : 'analytic';
+  }
+
+  // ---- group into ordered blocks (titles + cards + analytic shells) ----
+  const blocks=[];
+  let cur=null, curAn=null;
+  function newCard(tagText,tagPara){cur={type:'card',tag:tagText,tagPara:tagPara||null,paras:[]};curAn=null;blocks.push(cur);return cur;}
+  for(const pa of paras){
+    if(pa.role==='title'){cur=null;curAn=null;blocks.push({type:'title',text:pa.text.trim(),para:pa});}
+    else if(pa.role==='tag'){newCard(pa.text.trim(),pa);}
+    else if(pa.role==='analytic'){
+      cur=null;
+      if(!curAn){curAn={type:'analytics',paras:[]};blocks.push(curAn);}
+      curAn.paras.push(pa);
+    }
+    else { // cite or body
+      if(!pa.text.trim()&&pa.runs.length===0)continue; // drop truly empty paragraphs from grouping
+      curAn=null;
+      if(!cur)newCard('',null);
+      cur.paras.push(pa);
+    }
+  }
+
+  // Fallback for cards whose tag has NO formatting: if an untagged card's line directly
+  // above its citation is a short plain paragraph, promote it to the tag. (Only fires
+  // when no strong/bold/styled tag was found, so it can't hijack a real tag.)
+  for(const b of blocks){
+    if(b.type!=='card'||b.tag||!b.paras.length)continue;
+    let ci=-1; for(let k=0;k<b.paras.length;k++){ if(b.paras[k].role==='cite'){ci=k;break;} }
+    if(ci>=1){
+      const cand=b.paras[ci-1];
+      if(cand&&cand.wordCount>=1&&cand.wordCount<=30&&!cand.hasHighlight&&!cand.citeish){
+        b.tag=cand.text.trim(); b.tagPara=cand; b.paras.splice(ci-1,1);
+      }
+    }
+  }
+
+  // A "card" whose tag rode in on weak formatting cues (a bit bigger or partly
+  // bold, but not styled, not strongly bold, not a section name) and that has NO
+  // citation of its own is not a card: it's an emphasis line or pull-quote INSIDE
+  // the previous card's evidence (unshrunk default-size prose in condensed docs).
+  // Fold it back into the previous card as body text.
+  for(let bi=blocks.length-1;bi>=1;bi--){
+    const b=blocks[bi],prev=blocks[bi-1];
+    if(b.type!=='card'||prev.type!=='card')continue;
+    if(!b.tag||!b.tagPara)continue;
+    if(b.paras.some(function(p){return p.role==='cite';}))continue;
+    const tp=b.tagPara;
+    if(tp.fracBold>=0.5||tp.allCaps)continue;
+    if(styleIsHeaderish(tp.styleName)||sectionName(tp.text))continue;
+    tp.role='body';
+    prev.paras.push(tp);
+    for(const pa of b.paras)prev.paras.push(pa);
+    blocks.splice(bi,1);
+  }
+
+  // An untagged, cite-less card that follows a tagged card is a CONTINUATION of
+  // that card, even across intervening "analytics" that are really unshrunk,
+  // unhighlighted, non-bold lines inside the evidence (default-size prose the
+  // cutter never minimized). Fold the in-between blocks and the continuation
+  // back in, so a card's highlighted text always reads as one flow.
+  {
+    let i=1;
+    while(i<blocks.length){
+      const b=blocks[i];
+      if(b.type!=='card'||b.tag){i++;continue;}
+      if(b.paras.some(function(p){return p.role==='cite';})){i++;continue;}   // has its own cite: a real (untagged) card
+      let j=i-1;const between=[];
+      while(j>=0&&blocks[j].type==='analytics'
+            &&blocks[j].paras.every(function(p){return !p.hasHighlight&&p.fracBold<0.5&&!styleIsHeaderish(p.styleName)&&!sectionName(p.text);})){
+        between.unshift(j);j--;
+      }
+      if(j>=0&&blocks[j].type==='card'&&blocks[j].tag){
+        const host=blocks[j];
+        for(const bi2 of between){for(const p of blocks[bi2].paras){p.role='body';host.paras.push(p);}}
+        for(const p of b.paras)host.paras.push(p);
+        blocks.splice(j+1,i-j);
+        i=j+1;continue;
+      }
+      i++;
+    }
+  }
+
+  // An "untagged card" with NO citation and NO highlighting isn't a card at all:
+  // it's spoken analytic text (theory interps, standards, transitions) that
+  // followed a title. Reclassify so theory docs don't sprout empty cards.
+  for(let bi=0;bi<blocks.length;bi++){
+    const b=blocks[bi];
+    if(b.type!=='card'||b.tag)continue;
+    const hasCite=b.paras.some(function(p){return p.role==='cite';});
+    const hasHl=b.paras.some(function(p){return p.hasHighlight;});
+    if(!hasCite&&!hasHl)blocks[bi]={type:'analytics',paras:b.paras};
+  }
+
+  // ============================================================
+  //  Author-year on tags. Every tag should end with "Author 'YY".
+  //  Rules (in order), designed so no case ever doubles up:
+  //   1. If the tag ALREADY ends with an author-year, just normalize its
+  //      apostrophe (add a canonical ' before the 2-digit year if missing)
+  //      and STOP. Never append a second copy.  <- fixes "Dartnell 'X, Dartnell X"
+  //   2. Otherwise pull the author's surname + year from the card's citation.
+  //      - if that surname is already named in the tag, append only the year
+  //        (e.g. "...Bradshaw et al" -> "...Bradshaw et al '21");
+  //      - else append "Author 'YY".
+  //   3. If no year can be found anywhere, use "ND".
+  //  Any apostrophe variant (' ' ` ´ straight) is recognized; we always emit '.
+  // ============================================================
+  const CANON="’";                                              // the apostrophe we emit
+  // an author-year already sitting at the END of the tag
+  // "already processed" = the tag already ends with a year (apostrophized or bare)
+  // or with our own "ND" marker. Deliberately broad so re-parsing an augmented tag
+  // (e.g. through the in-place editor) is a no-op and never double-appends.
+  const HAS_TRAIL_YEAR=/(?:['‘’ʼ`´]\s?\d{2,4}|\b\d{2}['‘’ʼ`´]?)\s*[.,;:!?]*\s*$/;
+  const HAS_TRAIL_ND=/\bND\b\s*[.,;:!?]*\s*$/;
+  function apostrophizeTail(s){
+    // normalize a trailing 2-digit year to 'YY: handles bare "24", "'24" variants,
+    // AND the trailing-apostrophe style "24'" (which otherwise caused re-appends)
+    return s.replace(/([A-Za-z.)\]"’”]\s+)(?:['‘’ʼ`´]\s?)?(\d{2})['‘’ʼ`´]?(\s*[.,;:!?]*\s*)$/,
+      function(_all,pre,yy,tail){return pre+CANON+yy+tail;});
+  }
+  const AUTHOR_STOP=/^(?:The|A|An|And|Or|But|Not|No|If|As|At|By|For|From|In|On|Of|To|With|While|When|Where|Why|How|What|Which|Who|After|Before|During|Since|Until|Over|Under|Between|Most|Many|Some|All|Both|Each|Less|More|Also|However|Their|There|These|Those|This|That|It|Its|Our|We|You|They|He|She|Dr|Mr|Ms|Mrs|Prof|Effects|Indeed|First|Second|Third|Otherwise)$/i;
+  const NAME_CH="A-Za-zÀ-ÖØ-öø-ÿ";     // letters incl. accents (Naudé)
+  function authorYearFromCite(text){
+    if(!text)return {author:null,year:null};
+    let t=text.replace(/[​‌﻿]/g,'')
+              .replace(/https?:\/\/\S+|www\.\S+/gi,' ')             // URLs are digit soup, never the year
+              .replace(/\s+/g,' ').trim();
+    let author=null,year=null,m;
+    // 1) the leading "Author(s) YY [" / "( " / "—" / "." form wins for BOTH fields:
+    //    "Walker 23 [Robert...", "Beckstead '15 [Nick...", "Mihai Andrei 22. Master's...",
+    //    "Unger 9—founding member...", "HLR 25 [Harvard Law Review..."
+    m=t.match(new RegExp("^((?:['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]*[\\s,]+){0,3}['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]+)[\\s,]*['‘’ʼ`´]?(ND|\\d{1,2})\\s*[\\[\\(—–.,;-]"));
+    if(m){
+      const words=m[1].replace(/['‘’“”"]/g,' ').trim().split(/\s+/).filter(function(w){return new RegExp('['+NAME_CH+']').test(w);});
+      let idx=words.length-1;
+      while(idx>0&&/^[A-Z]\.?$/.test(words[idx]))idx--;
+      author=words[idx];
+      year=(m[2]==='ND'||m[2]===undefined)?null:m[2];
+      if(year&&year.length===1)year='0'+year;
+      if(m[2]==='ND')return {author:cleanAuthor(author),year:null};
+    }
+    // 2) year fallbacks, in decreasing reliability
+    if(!year){m=t.match(/\b\d{1,2}[\/\-.]\d{1,2}[\/\-.](?:19|20)?(\d{2})\b/);if(m)year=m[1];} // 4/14/05, 3-10-25
+    if(!year){m=t.match(/\b(?:19|20)(\d{2})\b/);if(m)year=m[1];}                              // April 13, 2015
+    if(!year){m=t.match(/['‘’ʼ`´](\d{2})\b/);if(m)year=m[1];}                  // 'YY anywhere
+    // 3) author fallbacks
+    if(!author){
+      m=t.match(new RegExp("^([A-Z]["+NAME_CH+"'‘’.-]+)\\s*,\\s*[A-Z]"));          // "Smith, John. ..."
+      if(m)author=m[1];
+    }
+    if(!author){
+      m=t.match(new RegExp("^((?:[A-Z]["+NAME_CH+"'‘’.-]*\\s+){0,4}[A-Z]["+NAME_CH+"'‘’.-]+)\\s*[\\[\\(‘'\"“,]"));
+      if(m){
+        const words=m[1].trim().split(/\s+/).filter(function(w){return new RegExp('['+NAME_CH+']').test(w);});
+        let idx=words.length-1;
+        while(idx>0&&/^[A-Z]\.?$/.test(words[idx]))idx--;
+        author=words[idx];
+      }
+    }
+    if(!author){m=t.match(new RegExp("^([A-Z]["+NAME_CH+"'‘’-]{2,})\\b"));if(m)author=m[1];}
+    return {author:cleanAuthor(author),year:year};
+  }
+  function cleanAuthor(last){
+    if(!last)return null;
+    last=last.replace(/[.,;:]+$/,'');
+    if(last.length<2)return null;
+    // sentence-starters are never author surnames; a "cite" that begins with one
+    // is prose, and inventing "The '19" or "After '73" is worse than no author
+    if(AUTHOR_STOP.test(last))return null;
+    return last;
+  }
+  function reEsc(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+  // reconcile a tagPara's runs to a new full string, editing only the changed
+  // tail so existing run formatting (bold/size/highlight) is preserved
+  function retextRuns(runs,newText){
+    let acc='';
+    for(let i=0;i<runs.length;i++){
+      const combined=acc+runs[i].text;
+      if(newText.indexOf(combined)===0){acc=combined;continue;}      // run unchanged
+      if(newText.indexOf(acc)===0){                                  // run i diverges
+        runs[i].text=newText.slice(acc.length);
+        for(let j=i+1;j<runs.length;j++)runs[j].text='';
+        return;
+      }
+      break;
+    }
+    const rem=newText.slice(acc.length);                             // pure append
+    if(rem){
+      const lr=runs.length?runs[runs.length-1]:null;
+      runs.push({text:rem,tier:(lr&&lr.tier==='read')?'emph':(lr?lr.tier:'emph'),color:null,
+                 szHP:lr?lr.szHP:26,bold:lr?lr.bold:true,underline:false,italic:lr?lr.italic:false});
+    }
+  }
+  function setTag(b,newTag){
+    if(b.tagPara&&b.tagPara.runs&&b.tagPara.runs.length){
+      retextRuns(b.tagPara.runs,newTag);
+      b.tagPara.runs=b.tagPara.runs.filter(function(r){return r.text.length;});
+      b.tagPara.text=b.tagPara.runs.map(function(r){return r.text;}).join('');
+      b.tag=b.tagPara.text.trim();
+    }else{
+      b.tag=newTag.trim();
+    }
+  }
+  for(const b of blocks){
+    if(b.type!=='card'||!b.tag)continue;
+    const tag=b.tag.replace(/\s+$/,'');
+    if(HAS_TRAIL_YEAR.test(tag)){                                    // rule 1: already ends with a year
+      const fixed=apostrophizeTail(tag);
+      if(fixed!==tag)setTag(b,fixed);
+      continue;
+    }
+    if(HAS_TRAIL_ND.test(tag))continue;                             // already marked ND: leave as is
+    const citePa=(b.paras||[]).find(function(p){return p.role==='cite';});
+    const ay=authorYearFromCite(citePa?citePa.text:'');             // rules 2-3
+    const yearStr=ay.year?(CANON+ay.year):'ND';
+    let suffix;
+    // suppress the author only when it already ENDS the tag ("...Bradshaw et al"
+    // gets just the year); an incidental mention mid-tag still gets the full pair
+    const endsWithAuthor=ay.author&&new RegExp('\\b'+reEsc(ay.author)+"(?:\\s+et\\s+al\\.?|\\s+(?:and|&)\\s+[A-Za-z'’.\\-]+)?\\s*[.,;:!?]*$",'i').test(tag);
+    if(endsWithAuthor)suffix=yearStr;
+    else if(ay.author)suffix=ay.author+' '+yearStr;
+    else suffix=yearStr;
+    const sep=/[.,;:!?]$/.test(tag)?' ':', ';
+    setTag(b,tag+sep+suffix);
+  }
+
+  // ---- spoken text (with spacing fix) + full-body html, per card ----
+  function escHtml(s){return (s||'').replace(/[&<>]/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':'&gt;';});}
+  function buildSpoken(paraList){
+    // ordered runs across the card's paragraphs, with a break between paragraphs
+    let text='',html='',started=false,pendingBreak=false;
+    for(let pi=0;pi<paraList.length;pi++){
+      if(pi>0&&started)pendingBreak=true; // paragraph boundary breaks a phrase
+      for(const r of paraList[pi].runs){
+        if(r.tier==='read'){
+          let piece=r.text;
+          if(started&&pendingBreak){
+            const leftWs=/\s$/.test(text), rightWs=/^\s/.test(piece);
+            if(!leftWs&&!rightWs){ text+=' '; html+=' '; }        // insert exactly one space
+            else if(leftWs&&rightWs){ piece=piece.replace(/^\s+/,''); } // both carry ws -> collapse to one
+          }
+          text+=piece;
+          html+='<mark class="hl" style="--hlc:'+cssColor(r.color)+';--hli:'+inkFor(r.color)+'">'+escHtml(piece)+'</mark>';
+          started=true;pendingBreak=false;
+        } else {
+          if(started)pendingBreak=true;
+        }
+      }
+    }
+    return {text:text.trim(),html:html};
+  }
+
+  let readWords=0,bulkWords=0,tagWords=0,titleWords=0,analyticWords=0,cardCount=0,titleCount=0,analyticCount=0;
+  const bulkPieces=[];
+  const tagTitlePieces=[];
+  for(const b of blocks){
+    if(b.type==='title'){titleCount++;titleWords+=wordCount(b.text);tagTitlePieces.push(b.text);continue;}
+    if(b.type==='analytics'){
+      analyticCount++;
+      const at=b.paras.map(function(pa){const t=pa.text.trim();return t?((pa.numText?pa.numText+' ':'')+t):'';}).filter(Boolean).join('\n');
+      b.analyticText=at;
+      analyticWords+=wordCount(at);
+      if(at)tagTitlePieces.push(at);   // analytics are KEPT (read aloud), never bulk
+      continue;
+    }
+    cardCount++;
+    if(b.tag){tagWords+=wordCount(b.tag);tagTitlePieces.push(b.tag);}
+    const sp=buildSpoken(b.paras);
+    b.spokenText=sp.text;b.spokenHtml=sp.html;
+    readWords+=wordCount(sp.text);
+    // bulk = every non-read run in this card's cite/body paragraphs
+    let cardBulk='';
+    for(const pa of b.paras){
+      let line='';
+      for(const r of pa.runs){ if(r.tier!=='read') line+=r.text; }
+      if(line.trim())cardBulk+=(cardBulk?'\n':'')+line;
+    }
+    if(cardBulk.trim()){bulkPieces.push(cardBulk);bulkWords+=wordCount(cardBulk);}
+  }
+
+  const streams={
+    tags:tagTitlePieces.join('\n'),
+    spoken:blocks.filter(function(b){return b.type==='card'&&b.spokenText;}).map(function(b){return b.spokenText;}).join('\n\n'),
+    bulk:bulkPieces.join('\n\n')
+  };
+
+  return {
+    blocks:blocks,
+    streams:streams,
+    stats:{
+      readWords:readWords,bulkWords:bulkWords,tagWords:tagWords,titleWords:titleWords,
+      analyticWords:analyticWords,analyticCount:analyticCount,
+      /* everything actually said aloud: highlighted text + tags + contention titles + analytics */
+      spokenWords:readWords+tagWords+titleWords+analyticWords,
+      cardCount:cardCount,titleCount:titleCount,
+      bodySize:bodySize,sizeGate:sizeGate,
+      totalWords:paras.reduce(function(a,p){return a+p.wordCount;},0)
+    }
+  };
+}
+
+/* luminance-based ink so text stays readable on any highlight color */
+function inkFor(hex){
+  if(!hex)return '#0b1220';
+  let c=(''+hex).replace('#','');
+  if(c.length===3)c=c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+  if(c.length!==6)return '#0b1220';
+  const r=parseInt(c.slice(0,2),16),g=parseInt(c.slice(2,4),16),b=parseInt(c.slice(4,6),16);
+  if(isNaN(r)||isNaN(g)||isNaN(b))return '#0b1220';
+  const L=(0.299*r+0.587*g+0.114*b)/255;
+  return L>0.55?'#0b1220':'#ffffff';
+}
+
+/* ---------- paste path: build the same model from pasted rich HTML ----------
+   When you copy a cut card from Word / Google Docs and paste it into a contenteditable,
+   the browser keeps the formatting as inline styles (background-color = highlight, bold,
+   font-size, underline). We read those off the live DOM to build the same `paras`. */
+function parseCssColor(s){
+  if(!s)return null; s=s.trim();
+  let m=s.match(/^rgba?\(([^)]+)\)/i);
+  if(m){ const p=m[1].split(',').map(function(x){return parseFloat(x);}); return {r:p[0]|0,g:p[1]|0,b:p[2]|0,a:p.length>3?p[3]:1}; }
+  m=s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+  if(m){ let h=m[1]; if(h.length===3)h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2]; return {r:parseInt(h.slice(0,2),16),g:parseInt(h.slice(2,4),16),b:parseInt(h.slice(4,6),16),a:1}; }
+  return null;
+}
+function rgbToHex(c){ function h(n){n=Math.max(0,Math.min(255,n|0)).toString(16);return n.length<2?'0'+n:n;} return '#'+h(c.r)+h(c.g)+h(c.b); }
+function domHighlightColor(node,stop){
+  let el=node.parentElement;
+  while(el&&el!==stop){
+    const c=parseCssColor(getComputedStyle(el).backgroundColor);
+    if(c&&c.a>0.05&&!(c.r>244&&c.g>244&&c.b>244)){
+      if(c.r<40&&c.g<40&&c.b<40)return null;   // blacked-out = redacted, never read
+      return rgbToHex(c);                       // non-transparent, non-white => highlight
+    }
+    el=el.parentElement;
+  }
+  return null;
+}
+function domAncestorIs(node,tags,stop){ let el=node.parentElement; while(el&&el!==stop){ if(tags.indexOf(el.tagName)>=0)return true; el=el.parentElement; } return false; }
+function domAncestorUnderline(node,stop){ let el=node.parentElement; while(el&&el!==stop){ const td=getComputedStyle(el).textDecorationLine||getComputedStyle(el).textDecoration||''; if(/underline/.test(td))return true; if(el.tagName==='U')return true; el=el.parentElement; } return false; }
+function buildCardModelFromDom(root){
+  const BLOCK=['P','DIV','LI','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','PRE','TR','SECTION'];
+  let leaves=Array.prototype.slice.call(root.querySelectorAll(BLOCK.map(function(t){return t.toLowerCase();}).join(',')))
+                   .filter(function(b){return !b.querySelector(BLOCK.map(function(t){return t.toLowerCase();}).join(','));});
+  if(!leaves.length)leaves=[root];
+  const paras=[];
+  for(const blk of leaves){
+    if(domAncestorIs(blk.firstChild||blk,['DEL','S','STRIKE'],root))continue;
+    const runs=[]; let boldChars=0,totalChars=0,maxSizeHP=0,text='';
+    const tw=document.createTreeWalker(blk,NodeFilter.SHOW_TEXT,null,false);
+    let node;
+    while((node=tw.nextNode())){
+      let t=node.nodeValue; if(!t)continue;
+      if(domAncestorIs(node,['DEL','S','STRIKE','SCRIPT','STYLE'],blk))continue;
+      const cs=getComputedStyle(node.parentElement);
+      const bold=(parseInt(cs.fontWeight,10)||400)>=600||domAncestorIs(node,['B','STRONG'],blk);
+      const italic=cs.fontStyle==='italic'||cs.fontStyle==='oblique'||domAncestorIs(node,['I','EM'],blk);
+      const underline=domAncestorUnderline(node,blk);
+      const px=parseFloat(cs.fontSize)||16;
+      const szHP=Math.max(2,Math.round(px*1.5));          // css px -> half-points (px*0.75pt*2)
+      const color=domHighlightColor(node,root);
+      const tier=color?'read':((bold||underline)?'emph':'bulk');
+      runs.push({text:t,tier:tier,color:color,szHP:szHP,bold:bold,underline:underline,italic:italic});
+      const len=t.length; totalChars+=len; if(bold)boldChars+=len;
+      const trimmed=t.trim(); if(trimmed){ if(szHP>maxSizeHP)maxSizeHP=szHP; }
+      text+=t;
+    }
+    if(!text.trim())continue;
+    const cr=capsRatio(text);
+    const tag=blk.tagName;
+    // the in-app editor round-trips the ORIGINAL Word style name through this
+    // attribute so styled tags/headers keep their meaning after an edit
+    const crStyle=blk.getAttribute&&blk.getAttribute('data-cr-style');
+    const styleName=crStyle||(/^H[1-6]$/.test(tag)?('heading '+tag[1]):tag.toLowerCase());
+    const numbered=tag==='LI'&&(function(){let e=blk.parentElement;while(e){if(e.tagName==='OL')return true;if(e.tagName==='UL')return false;e=e.parentElement;}return false;})();
+    paras.push({
+      el:blk,runs:runs,text:text,wordCount:wordCount(text),maxSizeHP:maxSizeHP,
+      fracBold:totalChars?boldChars/totalChars:0,
+      hasHighlight:runs.some(function(r){return r.tier==='read';}),
+      allCaps:(cr.ratio>=0.72&&cr.letters>=4),
+      styleName:styleName,styleId:'',citeish:isCiteish(text),
+      numId:numbered?'htmlol':null,ilvl:0,numText:null,role:null
+    });
+  }
+  if(!paras.length) throw new Error('No readable text was found in what you pasted.');
+  return finishCardModel(paras,{});
+}
+
+return {buildCardModel:buildCardModel,buildCardModelFromDom:buildCardModelFromDom,inkFor:inkFor,cssColor:cssColor};
+})();
+</script>
+
+<script>
+"use strict";
+(function(){
+const P=window.CardReaderParser;
+const $=function(id){return document.getElementById(id);};
+function esc(s){return (s||'').replace(/[&<>]/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':'&gt;';});}
+let plain='';
+function render(model){
+  let html='';plain='';
+  for(const b of model.blocks){
+    if(b.type==='title'){
+      html+='<div class="title">'+esc(b.text)+'</div>';
+      plain+=b.text.trim()+'\n\n';
+      continue;
+    }
+    if(b.type==='analytics'){
+      let lines='';
+      for(const pa of b.paras){
+        const t=pa.text.trim();if(!t)continue;
+        lines+='<div>'+(pa.numText?'<span class="num">'+esc(pa.numText)+'</span> ':'')+esc(t)+'</div>';
+        plain+=(pa.numText?pa.numText+' ':'')+t+'\n';
+      }
+      if(lines)html+='<div class="an">'+lines+'</div>';
+      plain+='\n';
+      continue;
+    }
+    if(b.tag){html+='<div class="tag">'+esc(b.tag)+'</div>';plain+=b.tag+'\n';}
+    if(b.spokenHtml){html+='<div class="read">'+b.spokenHtml+'</div>';plain+=b.spokenText+'\n\n';}
+    else if(b.tag){html+='<div class="muted">No highlighted text in this card.</div>';plain+='\n';}
+  }
+  // the parser emits marks with --hlc/--hli custom props; map to this page's vars
+  html=html.replace(/--hlc:/g,'--c:').replace(/--hli:/g,'--i:');
+  $('out').innerHTML=html||'<div class="muted">Nothing readable was found.</div>';
+  $('out').style.display='block';
+  $('copy').style.display=plain.trim()?'inline-block':'none';
+  plain=plain.replace(/\n{3,}/g,'\n\n').trim();
+}
+$('go').addEventListener('click',function(){
+  const box=$('box'),err=$('err');
+  err.style.display='none';
+  if(!box.textContent.trim()){err.textContent='Paste your case into the box first. Copy it straight from Word or Google Docs so the highlighting comes through.';err.style.display='block';return;}
+  try{ render(P.buildCardModelFromDom(box)); }
+  catch(e){ err.textContent='Could not read that text: '+((e&&e.message)||e); err.style.display='block'; }
+});
+$('clear').addEventListener('click',function(){
+  $('box').innerHTML='';$('out').innerHTML='';$('out').style.display='none';
+  $('copy').style.display='none';$('err').style.display='none';$('box').focus();
+});
+$('copy').addEventListener('click',function(){
+  const b=$('copy');
+  function ok(){const o=b.textContent;b.textContent='Copied!';b.classList.add('done');setTimeout(function(){b.textContent=o;b.classList.remove('done');},1100);}
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(plain).then(ok,function(){});}
+});
+})();
+</script>
+</body>
+</html>
