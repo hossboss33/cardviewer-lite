@@ -381,6 +381,82 @@ function buildCardModel(documentXml,stylesXml,numberingXml){
 function finishCardModel(paras,numbering){
   numbering=numbering||{};
 
+  // ---- split tag+cite combo paragraphs ----
+  // Some docs put the tag and the citation in ONE paragraph
+  // ("Empirically, Snowden proves. Miller 14 Claire Cain Miller [NYT...]").
+  // A citeish paragraph can never be a header, so the whole card would silently
+  // merge into the previous one. Split it into a tag paragraph + a cite
+  // paragraph when either boundary is detectable:
+  //   (a) bold tag prefix followed by a plain cite;
+  //   (b) the Verbatim "Last YY First ... Last [" name-repetition signature.
+  {
+    function paraFromRuns(src,runs){
+      let text='',boldChars=0,totalChars=0,maxSizeHP=0;
+      for(const r of runs){
+        text+=r.text;
+        const len=r.text.length;totalChars+=len;
+        if(r.bold)boldChars+=len;
+        if(r.text.trim()&&r.szHP>maxSizeHP)maxSizeHP=r.szHP;
+      }
+      const cr=capsRatio(text);
+      return {
+        el:src.el,runs:runs,text:text,wordCount:wordCount(text),maxSizeHP:maxSizeHP,
+        fracBold:totalChars?boldChars/totalChars:0,
+        hasHighlight:runs.some(function(r){return r.tier==='read';}),
+        allCaps:(cr.ratio>=0.72&&cr.letters>=4),
+        styleName:src.styleName,styleId:src.styleId,citeish:isCiteish(text),
+        numId:null,ilvl:0,numText:null,role:null
+      };
+    }
+    function splitParaAt(pa,offset){
+      const A=[],B=[];let pos=0;
+      for(const r of pa.runs){
+        const end=pos+r.text.length;
+        if(end<=offset)A.push(r);
+        else if(pos>=offset)B.push(r);
+        else{
+          const cut=offset-pos;
+          const ra={text:r.text.slice(0,cut),tier:r.tier,color:r.color,szHP:r.szHP,bold:r.bold,underline:r.underline,italic:r.italic};
+          const rb={text:r.text.slice(cut),tier:r.tier,color:r.color,szHP:r.szHP,bold:r.bold,underline:r.underline,italic:r.italic};
+          if(ra.text)A.push(ra);
+          if(rb.text)B.push(rb);
+        }
+        pos=end;
+      }
+      if(!A.length||!B.length)return null;
+      const pA=paraFromRuns(pa,A),pB=paraFromRuns(pa,B);
+      pA.numId=pa.numId;pA.ilvl=pa.ilvl;         // a list number belongs to the tag line
+      return [pA,pB];
+    }
+    for(let i=0;i<paras.length;i++){
+      const pa=paras[i];
+      if(!pa.citeish||pa.hasHighlight||pa.wordCount<8)continue;
+      let off=-1;
+      // (a) leading bold runs, then plain cite
+      if(pa.runs.length>=2){
+        let boldLen=0,k=0;
+        while(k<pa.runs.length&&(pa.runs[k].bold||!pa.runs[k].text.trim())){boldLen+=pa.runs[k].text.length;k++;}
+        if(k>0&&k<pa.runs.length&&boldLen>0){
+          const prefix=pa.text.slice(0,boldLen);
+          const w=prefix.trim().split(/\s+/).length;
+          if(w>=2&&w<=30&&!isCiteish(prefix))off=boldLen;
+        }
+      }
+      // (b) "sentence. Last YY First ... Last" - the repeated surname marks the cite
+      if(off<0){
+        const m=pa.text.match(/^(.{8,160}?[.!?:])\s+(?=([A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’.\-]+)\s+['‘’]?\d{1,2}\s+(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'’.\-]*\s+){0,3}\2\b)/);
+        if(m)off=m[1].length;
+      }
+      if(off>0){
+        const pair=splitParaAt(pa,off);
+        if(pair&&pair[0].text.trim()&&pair[1].text.trim()&&isCiteish(pair[1].text)){
+          paras.splice(i,1,pair[0],pair[1]);
+          i++;
+        }
+      }
+    }
+  }
+
   // Strip export junk like <<TABLE OMITTED>> or <<LINE BREAK>> (Lexis/Verbatim
   // drop these markers where a table, graphic, or break sat in the source). Any
   // <<...>> token is such a marker, never spoken content. Short + ALL-CAPS, so
@@ -561,6 +637,24 @@ function finishCardModel(paras,numbering){
     else { // cite or body
       if(!pa.text.trim()&&pa.runs.length===0)continue; // drop truly empty paragraphs from grouping
       curAn=null;
+      // a fresh citation, after the current card already has its cite AND read
+      // text, starts a NEW card: docs whose tags carry no formatting would
+      // otherwise silently pour every following card into this one. To avoid
+      // splitting on citey-looking prose INSIDE evidence, this only fires when
+      // the new cite has a structural signature (URL / [quals] / (quals)) AND a
+      // short plain tag-candidate line sits right above it, which moves over.
+      if(cur&&pa.role==='cite'
+         &&/https?:\/\/|www\.[a-z0-9]|\[[^\]]{3,}\]|\([A-Z][^)]{25,}/i.test(pa.text)
+         &&cur.paras.some(function(x){return x.role==='cite';})
+         &&cur.paras.some(function(x){return x.hasHighlight;})){
+        const lastPa=cur.paras[cur.paras.length-1];
+        if(lastPa&&lastPa.role==='body'&&!lastPa.hasHighlight&&!lastPa.citeish
+           &&lastPa.wordCount>=2&&lastPa.wordCount<=30){
+          const pre=cur.paras.pop();
+          cur=newCard('',null);
+          cur.paras.push(pre);
+        }
+      }
       if(!cur)newCard('',null);
       cur.paras.push(pa);
     }
@@ -655,13 +749,24 @@ function finishCardModel(paras,numbering){
   // "already processed" = the tag already ends with a year (apostrophized or bare)
   // or with our own "ND" marker. Deliberately broad so re-parsing an augmented tag
   // (e.g. through the in-place editor) is a no-op and never double-appends.
-  const HAS_TRAIL_YEAR=/(?:['‘’ʼ`´]\s?\d{2,4}|\b\d{2}['‘’ʼ`´]?)\s*[.,;:!?]*\s*$/;
+  // trailing year forms: "'24", "24", "24'", author-attached "Pizzola18",
+  // and single-digit "Zagorin 9"
+  const HAS_TRAIL_YEAR=/(?:['‘’ʼ`´]\s?\d{2,4}|\b\d{2}['‘’ʼ`´]?|[A-Za-z]\d{2}|[A-Za-z]{2,}\s+\d)\s*[.,;:!?]*\s*$/;
   const HAS_TRAIL_ND=/\bND\b\s*[.,;:!?]*\s*$/;
   function apostrophizeTail(s){
     // normalize a trailing 2-digit year to 'YY: handles bare "24", "'24" variants,
     // AND the trailing-apostrophe style "24'" (which otherwise caused re-appends)
-    return s.replace(/([A-Za-z.)\]"’”]\s+)(?:['‘’ʼ`´]\s?)?(\d{2})['‘’ʼ`´]?(\s*[.,;:!?]*\s*)$/,
+    let r=s.replace(/([A-Za-z.)\]"’”]\s+)(?:['‘’ʼ`´]\s?)?(\d{2})['‘’ʼ`´]?(\s*[.,;:!?]*\s*)$/,
       function(_all,pre,yy,tail){return pre+CANON+yy+tail;});
+    if(r!==s)return r;
+    // author-attached "Pizzola18" -> "Pizzola '18"
+    r=s.replace(/([A-Za-z])(\d{2})(\s*[.,;:!?]*\s*)$/,
+      function(_all,ch,yy,tail){return ch+' '+CANON+yy+tail;});
+    if(r!==s)return r;
+    // single-digit "Zagorin 9" -> "Zagorin '09"
+    r=s.replace(/([A-Za-z]{2,}\s+)(\d)(\s*[.,;:!?]*\s*)$/,
+      function(_all,pre,y,tail){return pre+CANON+'0'+y+tail;});
+    return r;
   }
   const AUTHOR_STOP=/^(?:The|A|An|And|Or|But|Not|No|If|As|At|By|For|From|In|On|Of|To|With|While|When|Where|Why|How|What|Which|Who|After|Before|During|Since|Until|Over|Under|Between|Most|Many|Some|All|Both|Each|Less|More|Also|However|Their|There|These|Those|This|That|It|Its|Our|We|You|They|He|She|Dr|Mr|Ms|Mrs|Prof|Effects|Indeed|First|Second|Third|Otherwise)$/i;
   const NAME_CH="A-Za-zÀ-ÖØ-öø-ÿ";     // letters incl. accents (Naudé)
@@ -758,6 +863,9 @@ function finishCardModel(paras,numbering){
     const citePa=(b.paras||[]).find(function(p){return p.role==='cite';});
     const ay=authorYearFromCite(citePa?citePa.text:'');             // rules 2-3
     const yearStr=ay.year?(CANON+ay.year):'ND';
+    // if the author already appears WITH a year anywhere in the tag ("Bradford13
+    // quantifies that"), the tag has its cite: never append a second copy
+    if(ay.author&&new RegExp('\\b'+reEsc(ay.author)+"\\s?['‘’ʼ`´]?\\d{1,2}\\b",'i').test(tag))continue;
     let suffix;
     // suppress the author only when it already ENDS the tag ("...Bradshaw et al"
     // gets just the year); an incidental mention mid-tag still gets the full pair
