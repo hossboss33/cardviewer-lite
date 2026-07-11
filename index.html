@@ -245,7 +245,23 @@ function isCiteish(text){
   if(/(?:^|\s)[A-Z][A-Za-zÀ-ÿ'’.\-]+\s+['‘’]?\d{1,2}\s*(?:--|—|–)?\s*\[/.test(t))return true; // mid-sentence "... Pearce 23 -- [..."
   if(/^[A-Z][A-Za-zÀ-ÿ'’.\-]+(?:\s+[A-Z][A-Za-zÀ-ÿ'’.\-]+){0,3},\s*\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/.test(t))return true; // "Rich Cooper, 03-30-2015, ..."
   if(/^[A-Z][A-Za-zÀ-ÿ'’.\-]+,\s+[A-Z][A-Za-zÀ-ÿ'’.\- ]{0,40}\.\s*["“]/.test(t))return true; // "Rivera, Ana. "Untitled essay."" - undated cites still name their author
-  const bracket=/\[[^\]]{3,}\]/.test(t);
+  // protocol-less URL: cites routinely drop the https:// ("thehill.com/opinion/...",
+  // "route-fifty.com/cybersecurity/...", "tandfonline.com/doi/full/10.1080/...")
+  if(/(?:^|[\s,;("'“‘])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+\/[\w\-.~/?#%=&+]{3,}/i.test(t))return true;
+  // bracketless author-year lead: "Stares 24. <quals>. "Title." The Hill. 1/13/2024...",
+  // "Ramiah et al ’25, <full names>, 6-25-2025, ...", "Bailey 26. ..." — name(s) plus a
+  // 1-2 digit year ending in , or . instead of the bracket/paren/dash forms above.
+  // Corroboration elsewhere in the paragraph (quoted title / numeric date / DOA / bare
+  // domain) keeps prose like "Apollo 11. Launched July 16, 1969..." out of the cite bin.
+  if(/^(?:[A-Z][A-Za-zÀ-ÿ'’.\-]*[\s,]+(?:(?:and|&)\s+)?){0,4}[A-Z][A-Za-zÀ-ÿ'’.\-]+(?:\s+et\s+al\.?)?,?\s+['‘’]?\d{1,2}\s*[.,]/.test(t)
+     &&(/["“][^"“”]{6,}["”]/.test(t)
+        ||/\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b/.test(t)
+        ||/\bDOA\b|\bdate\s+of\s+access|\baccessed\b/i.test(t)
+        ||/(?:^|[\s,;("'“‘])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|org|net|edu|gov|mil|int|io|co)\b/i.test(t)
+        ||(/\b(?:19|20)\d{2}\b/.test(t)&&/\b(?:UP|University|Press|Journal|Review|Quarterly|Oxford|Cambridge|Routledge|Vol)\b/.test(t))))return true;
+  // quals brackets carry names/credentials (capitals, digits); a lowercase-only bracket
+  // is an editorial insertion ("$500 [billion] gap") and no citation signal at all
+  const bracket=/\[(?=[^\]]{3,}\])[^\]]*[A-Z0-9][^\]]*\]/.test(t);
   const date=/\b(?:19|20)\d{2}\b/.test(t)||/\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b/.test(t)||/date\s+accessed/i.test(t);
   if(bracket&&date)return true;
   // plain academic form: "Smith, John. "Title." Journal, 2024." - an author-name
@@ -541,7 +557,10 @@ function finishCardModel(paras,numbering){
   // cards whose tag has no formatting at all.)
   const styleIsHeaderish=function(name){return /heading|(^|\W)tag(\W|$)|pocket|hat|block|title|subtitle|caps\b/i.test(name||'');};
   function isStrongHeader(pa){
-    if(!pa.text.trim()||pa.hasHighlight||pa.citeish)return false;
+    if(!pa.text.trim()||pa.hasHighlight)return false;
+    // citeish text can't be a header — but a HEADING-STYLED line is the doc's own
+    // structure; "Link 2 – AI Authoritarianism" must not be eaten by a cite regex
+    if(pa.citeish&&!styleIsHeaderish(pa.styleName))return false;
     // letter/roman-enumerated ALL-CAPS lines ("C. GOVERNMENT...", "IV. MEASURES...")
     // are outline headings the source article carried, never tags
     if(pa.allCaps&&/^\s*(?:[IVXLCDM]{1,4}|[A-Z])[.)]\s/.test(pa.text))return false;
@@ -557,6 +576,20 @@ function finishCardModel(paras,numbering){
     }
     return false;
   }
+  // A cite split across two lines: "Hayes et al ’25" alone (a pure author-year line)
+  // with the quals/source paragraph right below it ("[Mike Hayes et al (Mike leads...").
+  // The naked author-year line is part of the CITE, not a tag — mark it citeish so it
+  // can't be promoted to a strong header and steal the real tag's card.
+  for(let i=0;i<paras.length;i++){
+    const pa=paras[i];
+    if(pa.citeish||pa.hasHighlight)continue;
+    // name-shaped words only (with and/&/et al connectors) — a SENTENCE that happens to
+    // end in a year ("Economic decline causes war - Jung '24") is a tag, not a cite line
+    if(!/^[A-Z][A-Za-zÀ-ÿ'’.\-]*(?:\s+(?:and\s+|&\s+)?[A-Z][A-Za-zÀ-ÿ'’.\-]*|,\s*[A-Z][A-Za-zÀ-ÿ'’.\-]*){0,5}(?:\s+et\s+al\.?)?[\s,]*['‘’]?\d{1,2}\s*[.,]?\s*$/.test(pa.text.trim()))continue;
+    let j=i+1; while(j<paras.length&&!paras[j].text.trim())j++;
+    if(j<paras.length&&!paras[j].hasHighlight
+       &&(paras[j].citeish||/^\s*[\[(,]/.test(paras[j].text)))pa.citeish=true; // "," = quals continuing the cite line
+  }
   const strong=paras.map(isStrongHeader);
 
   // Nothing sandwiched between a citation and its card body may act as a header.
@@ -567,6 +600,7 @@ function finishCardModel(paras,numbering){
   // paragraphs (a genuine back-to-back card); otherwise it's demoted to body.
   for(let i=0;i<paras.length;i++){
     if(!strong[i])continue;
+    if(styleIsHeaderish(paras[i].styleName))continue; // real heading styles ("Link", "NEG - Budgets") are never export junk
     let p=i-1;
     while(p>=0&&!paras[p].text.trim())p--;
     if(p<0||!paras[p].citeish)continue;
@@ -614,7 +648,7 @@ function finishCardModel(paras,numbering){
   // block content, e.g. a theory shell's interp/standards/voters) / cite / body.
   for(let i=0;i<paras.length;i++){
     if(paras[i].wordCount<=12&&sectionName(paras[i].text)){ paras[i].role='title'; continue; }
-    if(!strong[i]){ paras[i].role=paras[i].citeish?'cite':'body'; continue; }
+    if(!strong[i]){ paras[i].role=(paras[i].citeish&&!paras[i].hasHighlight)?'cite':'body'; continue; } // highlighted text is READ evidence, never a cite line
     if(isTagArr[i]){ paras[i].role='tag'; continue; }
     // A tag-less strong header is a section/shell TITLE if it's big (style or font) or
     // ALL-CAPS (a classic divider cue); otherwise it's read-aloud ANALYTIC content.
@@ -679,18 +713,34 @@ function finishCardModel(paras,numbering){
   // citation of its own is not a card: it's an emphasis line or pull-quote INSIDE
   // the previous card's evidence (unshrunk default-size prose in condensed docs).
   // Fold it back into the previous card as body text.
+  const docHasStyledTags=blocks.some(function(x){return x.type==='card'&&x.tagPara&&styleIsHeaderish(x.tagPara.styleName);});
+  // in-evidence emphasis lines (bold sentences the source carried) that were parked
+  // as analytics — safe to hop over / absorb when re-attaching a bold sub-head card
+  const weakAnalytics=function(x){return x.type==='analytics'&&x.paras.every(function(p){
+    return !p.hasHighlight&&p.maxSizeHP<=bodySize&&!styleIsHeaderish(p.styleName)&&!sectionName(p.text);});};
   for(let bi=blocks.length-1;bi>=1;bi--){
-    const b=blocks[bi],prev=blocks[bi-1];
-    if(b.type!=='card'||prev.type!=='card')continue;
+    const b=blocks[bi];
+    if(b.type!=='card')continue;
     if(!b.tag||!b.tagPara)continue;
     if(b.paras.some(function(p){return p.role==='cite';}))continue;
     const tp=b.tagPara;
-    if(tp.fracBold>=0.5||tp.allCaps)continue;
+    // fully-bold at BODY size ("Energy systems" / "Transport" sector sub-heads inside a
+    // long report quote) is not a tag when this doc's real tags are styled headers and
+    // this "card" brought no cite of its own — fold it back like any emphasis line.
+    const boldSubhead=tp.fracBold>=0.5&&tp.maxSizeHP<=bodySize&&docHasStyledTags&&!tp.allCaps;
+    if((tp.fracBold>=0.5||tp.allCaps)&&!boldSubhead)continue;
     if(styleIsHeaderish(tp.styleName)||sectionName(tp.text))continue;
+    // find the host: the previous card, optionally hopping (for bold sub-heads) over
+    // in-evidence emphasis lines that were parked as weak analytics blocks
+    let j=bi-1;const between=[];
+    while(j>=0&&boldSubhead&&weakAnalytics(blocks[j])){between.unshift(j);j--;}
+    if(j<0||blocks[j].type!=='card')continue;
+    const host=blocks[j];
+    for(const k of between){for(const p of blocks[k].paras){p.role='body';host.paras.push(p);}}
     tp.role='body';
-    prev.paras.push(tp);
-    for(const pa of b.paras)prev.paras.push(pa);
-    blocks.splice(bi,1);
+    host.paras.push(tp);
+    for(const pa of b.paras)host.paras.push(pa);
+    blocks.splice(j+1,bi-j);
   }
 
   // An untagged, cite-less card that follows a tagged card is a CONTINUATION of
@@ -706,7 +756,7 @@ function finishCardModel(paras,numbering){
       if(b.paras.some(function(p){return p.role==='cite';})){i++;continue;}   // has its own cite: a real (untagged) card
       let j=i-1;const between=[];
       while(j>=0&&blocks[j].type==='analytics'
-            &&blocks[j].paras.every(function(p){return !p.hasHighlight&&p.fracBold<0.5&&!styleIsHeaderish(p.styleName)&&!sectionName(p.text);})){
+            &&blocks[j].paras.every(function(p){return !p.hasHighlight&&(p.fracBold<0.5||(p.maxSizeHP<=bodySize&&docHasStyledTags))&&!styleIsHeaderish(p.styleName)&&!sectionName(p.text);})){ // bold-at-body-size = in-evidence emphasis, hop it too
         between.unshift(j);j--;
       }
       if(j>=0&&blocks[j].type==='card'&&blocks[j].tag){
@@ -731,6 +781,20 @@ function finishCardModel(paras,numbering){
     if(!hasCite&&!hasHl)blocks[bi]={type:'analytics',paras:b.paras};
   }
 
+  // A card has ONE citation: its first consecutive run of cite paragraphs. A later,
+  // separate "cite" inside the same card is citey-LOOKING prose (figure captions,
+  // "[PRC]"-bracketed article text) — show it as body, not as a second cite line.
+  for(const b of blocks){
+    if(b.type!=='card')continue;
+    let seen=false,inRun=false;
+    for(const p of b.paras){
+      if(p.role==='cite'){
+        if(seen&&!inRun)p.role='body';
+        else{seen=true;inRun=true;}
+      }else if((p.text||'').trim())inRun=false;
+    }
+  }
+
   // ============================================================
   //  Author-year on tags. Every tag should end with "Author 'YY".
   //  Rules (in order), designed so no case ever doubles up:
@@ -751,7 +815,11 @@ function finishCardModel(paras,numbering){
   // (e.g. through the in-place editor) is a no-op and never double-appends.
   // trailing year forms: "'24", "24", "24'", author-attached "Pizzola18",
   // and single-digit "Zagorin 9"
-  const HAS_TRAIL_YEAR=/(?:['‘’ʼ`´]\s?\d{2,4}|\b\d{2}['‘’ʼ`´]?|[A-Za-z]\d{2}|[A-Za-z]{2,}\s+\d)\s*[.,;:!?]*\s*$/;
+  // Every bare-digit form requires a Name-shaped word (or an apostrophe) in front, so
+  // tags that merely END in a number ("...cut emissions by 50", "...under Article 15",
+  // "...COVID19") aren't mistaken for already-cited tags — which both skipped the real
+  // cite append AND let apostrophizeTail corrupt them into fake years ("by ’50").
+  const HAS_TRAIL_YEAR=/(?:['‘’ʼ`´]\s?\d{2,4}|[A-Z][A-Za-zÀ-ÿ'’.\-]*\s+\d{2}['‘’ʼ`´]?|[A-Za-z]*[a-z]\d{2}|[A-Z][A-Za-zÀ-ÿ'’.\-]+\s+\d\b)\s*[.,;:!?]*\s*$/;
   const HAS_TRAIL_ND=/\bND\b\s*[.,;:!?]*\s*$/;
   function apostrophizeTail(s){
     // normalize a trailing 2-digit year to 'YY: handles bare "24", "'24" variants,
@@ -774,19 +842,28 @@ function finishCardModel(paras,numbering){
     if(!text)return {author:null,year:null};
     let t=text.replace(/[​‌﻿]/g,'')
               .replace(/https?:\/\/\S+|www\.\S+/gi,' ')             // URLs are digit soup, never the year
+              .replace(/\b(?:DOA|date\s+(?:of\s+)?access(?:ed)?|accessed|retrieved)\b[:\s]*[\d\/\-.]{0,12}/gi,' ') // access dates are never the pub year
               .replace(/\s+/g,' ').trim();
     let author=null,year=null,m;
     // 1) the leading "Author(s) YY [" / "( " / "—" / "." form wins for BOTH fields:
     //    "Walker 23 [Robert...", "Beckstead '15 [Nick...", "Mihai Andrei 22. Master's...",
     //    "Unger 9—founding member...", "David Denkenberger et al. 17, [Dr. ..."
-    m=t.match(new RegExp("^((?:['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]*[\\s,]+){0,3}['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]+)(?:\\s+et\\s+al\\.?|\\s+(?:and|&)\\s+[A-Z][."+NAME_CH+"'‘’-]+)?[\\s,]*['‘’ʼ`´]?(ND|\\d{1,2})\\s*[\\[\\(—–.,;-]"));
+    // the "-" separator must not be a date's innards: in "Rich Cooper, 03-30-2015" the
+    // 03 is a month, not the year ("-" only counts as a separator when no digit follows)
+    m=t.match(new RegExp("^((?:['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]*[\\s,]+){0,3}['‘’“”\"]?[A-Z][."+NAME_CH+"'‘’-]+)(?:\\s+et\\s+al\\.?|\\s+(?:and|&)\\s+(?:[A-Z][."+NAME_CH+"'‘’-]+\\s+){0,2}[A-Z][."+NAME_CH+"'‘’-]+)?[\\s,]*['‘’ʼ`´]?(ND|\\d{1,2})\\s*(?:[\\[\\(—–.,;]|-(?!\\d)|$)"));
     if(m){
       const words=m[1].replace(/['‘’“”"]/g,' ').trim().split(/\s+/).filter(function(w){return new RegExp('['+NAME_CH+']').test(w);});
       let idx=words.length-1;
       while(idx>0&&/^[A-Z]\.?$/.test(words[idx]))idx--;
       author=words[idx];
       year=(m[2]==='ND'||m[2]===undefined)?null:m[2];
-      if(year&&year.length===1)year='0'+year;
+      if(year&&year.length===1){
+        // a single digit after the name is usually a year ("Unger 9" = 2009) but can be
+        // a duplicate-cite ordinal ("Ripstein 3, Arthur. ... Harvard UP, 2009."): when
+        // the cite itself names a 4-digit year, trust that over the lone digit
+        const y4=t.match(/\b(?:19|20)(\d{2})\b/);
+        year=y4?y4[1]:('0'+year);
+      }
       if(m[2]==='ND')return {author:cleanAuthor(author),year:null};
     }
     // 2) year fallbacks, in decreasing reliability
@@ -861,7 +938,32 @@ function finishCardModel(paras,numbering){
     }
     if(HAS_TRAIL_ND.test(tag))continue;                             // already marked ND: leave as is
     const citePa=(b.paras||[]).find(function(p){return p.role==='cite';});
-    const ay=authorYearFromCite(citePa?citePa.text:'');             // rules 2-3
+    // a cite split over consecutive paragraphs ("Lee and West 25" / ", Nicol Turner Lee
+    // Director..., 5-12-2025,...") reads as ONE citation for author/year extraction
+    let citeSrc='';
+    if(citePa){
+      const ps=b.paras;let ci=ps.indexOf(citePa);const parts=[];
+      while(ci<ps.length&&ps[ci].role==='cite'){parts.push(ps[ci].text);ci++;}
+      citeSrc=parts.join(' ');
+    }
+    // "A] ... / B] ..." multi-part cards share one cite: a cite-less card whose tag
+    // opens with a sub-point marker and carries highlighted evidence inherits the
+    // author-year of the card directly above it (same source, split under lettered tags).
+    if(!citeSrc&&/^[A-Za-z0-9]{1,3}[\].)]\s/.test(tag)&&b.paras.some(function(p){return p.hasHighlight;})){
+      const bi=blocks.indexOf(b);
+      const pb=bi>0?blocks[bi-1]:null;
+      if(pb&&pb.type==='card'){
+        const pc=(pb.paras||[]).find(function(p){return p.role==='cite';});
+        if(pc)citeSrc=pc.text;
+      }
+    }
+    const ay=authorYearFromCite(citeSrc);                           // rules 2-3
+    // a cite-less card whose TAG already leads with "Author YY, ..." is a cite line
+    // wearing a tag's formatting — appending "ND" after a visible date reads absurd
+    if(!ay.year&&!citePa){
+      const ayTag=authorYearFromCite(tag);
+      if(ayTag.year)continue;
+    }
     const yearStr=ay.year?(CANON+ay.year):'ND';
     // if the author already appears WITH a year anywhere in the tag ("Bradford13
     // quantifies that"), the tag has its cite: never append a second copy
